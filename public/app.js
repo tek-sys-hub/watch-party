@@ -12,17 +12,51 @@ let localStream = null;        // mic stream
 let screenStream = null;       // screen share stream
 let isMicOn = false;
 let isScreenSharing = false;
+let isStreamMutedOnMySide = false;
 let isChatVisible = true;
 let peers = {};                // { peerId: RTCPeerConnection }
 let participants = [];
+let peerMicStates = {};        // { socketId: boolean }
 let hostId = null;
 
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:openrelay.metered.ca:80' },
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    }
   ]
 };
+
+// Queue ICE candidates arriving before remote description is set
+const iceCandidateQueues = {};
+
+async function drainIceCandidateQueue(peerId, pc) {
+  const queue = iceCandidateQueues[peerId];
+  if (!queue || queue.length === 0) return;
+  while (queue.length > 0) {
+    const candidate = queue.shift();
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch (err) {
+      console.warn(`[WebRTC ${peerId}] Error adding queued ICE candidate:`, err);
+    }
+  }
+}
 
 // ── DOM Elements ──
 const landing = document.getElementById('landing');
@@ -50,6 +84,8 @@ const sidebar = document.getElementById('sidebar');
 const btnMic = document.getElementById('btnMic');
 const btnScreen = document.getElementById('btnScreen');
 const btnChatToggle = document.getElementById('btnChatToggle');
+const btnStreamAudio = document.getElementById('btnStreamAudio');
+const videoAudioBadge = document.getElementById('videoAudioBadge');
 
 // ══════════════════════════════════
 // MODAL NAVIGATION
@@ -183,6 +219,92 @@ function toggleChat() {
 }
 
 // ══════════════════════════════════
+// STREAM AUDIO (MUTE STREAM ON YOUR SIDE)
+// ══════════════════════════════════
+
+function toggleStreamAudio() {
+  if (isScreenSharing) {
+    showToast('You are sharing: your tab audio is already playing on your PC');
+    return;
+  }
+
+  isStreamMutedOnMySide = !isStreamMutedOnMySide;
+  videoEl.muted = isStreamMutedOnMySide;
+  updateStreamAudioUI();
+
+  if (isStreamMutedOnMySide) {
+    showToast('Stream sound muted on your side 🔇');
+  } else {
+    showToast('Stream sound unmuted 🔊');
+  }
+}
+
+function updateStreamAudioUI() {
+  const badge = document.getElementById('videoAudioBadge');
+  const badgeOn = document.getElementById('badgeSoundOn');
+  const badgeOff = document.getElementById('badgeSoundOff');
+  const badgeText = document.getElementById('badgeSoundText');
+
+  const btn = document.getElementById('btnStreamAudio');
+  const tbOn = document.getElementById('toolbarSoundOn');
+  const tbOff = document.getElementById('toolbarSoundOff');
+  const tbText = document.getElementById('toolbarSoundText');
+
+  if (isScreenSharing) {
+    if (badge) {
+      badge.style.display = 'flex';
+      badge.classList.remove('muted');
+    }
+    if (badgeOn) badgeOn.style.display = 'block';
+    if (badgeOff) badgeOff.style.display = 'none';
+    if (badgeText) badgeText.textContent = 'Playing on your PC';
+
+    if (btn) {
+      btn.style.display = 'inline-flex';
+      btn.classList.remove('muted');
+    }
+    if (tbOn) tbOn.style.display = 'block';
+    if (tbOff) tbOff.style.display = 'none';
+    if (tbText) tbText.textContent = 'Local Audio';
+    return;
+  }
+
+  if (isStreamMutedOnMySide) {
+    if (badge) {
+      badge.style.display = 'flex';
+      badge.classList.add('muted');
+    }
+    if (badgeOn) badgeOn.style.display = 'none';
+    if (badgeOff) badgeOff.style.display = 'block';
+    if (badgeText) badgeText.textContent = 'Muted (Your side)';
+
+    if (btn) {
+      btn.style.display = 'inline-flex';
+      btn.classList.add('muted');
+    }
+    if (tbOn) tbOn.style.display = 'none';
+    if (tbOff) tbOff.style.display = 'block';
+    if (tbText) tbText.textContent = 'Unmute Stream';
+  } else {
+    if (badge) {
+      badge.style.display = 'flex';
+      badge.classList.remove('muted');
+    }
+    if (badgeOn) badgeOn.style.display = 'block';
+    if (badgeOff) badgeOff.style.display = 'none';
+    if (badgeText) badgeText.textContent = 'Stream Sound';
+
+    if (btn) {
+      btn.style.display = 'inline-flex';
+      btn.classList.remove('muted');
+    }
+    if (tbOn) tbOn.style.display = 'block';
+    if (tbOff) tbOff.style.display = 'none';
+    if (tbText) tbText.textContent = 'Mute Stream';
+  }
+}
+
+// ══════════════════════════════════
 // PARTICIPANTS
 // ══════════════════════════════════
 
@@ -197,6 +319,11 @@ socket.on('participants-updated', (list) => {
   renderParticipants();
 });
 
+socket.on('user-mic-changed', ({ id, isMicOn: status }) => {
+  peerMicStates[id] = status;
+  renderParticipants();
+});
+
 function renderParticipants() {
   participantsList.innerHTML = '';
   participantCount.textContent = participants.length;
@@ -208,6 +335,7 @@ function renderParticipants() {
 
     const isMe = p.id === socket.id;
     const isHost = p.id === hostId;
+    const peerMicOn = isMe ? isMicOn : !!peerMicStates[p.id];
 
     row.innerHTML = `
       <div class="participant-avatar ${AVATAR_COLORS[i % AVATAR_COLORS.length]}">${escapeHtml(p.username.charAt(0))}</div>
@@ -215,8 +343,13 @@ function renderParticipants() {
         ${escapeHtml(p.username)}${isHost ? ' <span class="host-badge">👑</span>' : ''}${isMe ? ' <span class="you-tag">(You)</span>' : ''}
       </div>
       <div class="participant-status">
-        <span class="status-dot"></span>
-        <svg class="participant-mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        <span class="status-dot" style="${peerMicOn ? '' : 'background: var(--text-muted); opacity: 0.4;'}"></span>
+        <svg class="participant-mic-icon" style="${peerMicOn ? 'color: var(--green);' : 'color: var(--text-muted); opacity: 0.4;'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          ${peerMicOn 
+            ? '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>'
+            : '<line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>'
+          }
+        </svg>
       </div>
     `;
 
@@ -283,40 +416,79 @@ function addSystemMessage(text) {
 
 async function toggleMic() {
   if (isMicOn) {
-    // Turn off mic
-    if (localStream) {
-      localStream.getTracks().forEach(t => t.stop());
-      localStream = null;
-    }
+    // Mute mic: silence track without breaking WebRTC connection
     isMicOn = false;
-    btnMic.classList.add('muted');
-    btnMic.querySelector('.pill-label').textContent = 'Mic Off';
-
-    // Remove audio track from all peer connections
-    Object.values(peers).forEach(pc => {
-      const senders = pc.getSenders();
-      senders.forEach(sender => {
-        if (sender.track && sender.track.kind === 'audio') {
-          pc.removeTrack(sender);
-        }
+    if (localStream) {
+      localStream.getAudioTracks().forEach(t => {
+        t.enabled = false;
       });
-    });
-  } else {
-    try {
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      isMicOn = true;
-      btnMic.classList.remove('muted');
-      btnMic.querySelector('.pill-label').textContent = 'Mic On';
-
-      // Add audio track to all peer connections
-      const audioTrack = localStream.getAudioTracks()[0];
-      Object.values(peers).forEach(pc => {
-        pc.addTrack(audioTrack, localStream);
-      });
-    } catch (err) {
-      showToast('Mic access denied');
-      console.error('Mic error:', err);
     }
+    updateMicUI();
+    renderParticipants();
+    socket.emit('user-mic-toggle', { isMicOn: false });
+    showToast('Microphone muted 🔇');
+  } else {
+    // Turn on / unmute mic
+    try {
+      if (!localStream || !localStream.getAudioTracks().length || localStream.getAudioTracks()[0].readyState === 'ended') {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+
+        const audioTrack = localStream.getAudioTracks()[0];
+        audioTrack.enabled = true;
+
+        // Attach audio track to all peer connections and renegotiate if needed
+        Object.entries(peers).forEach(([peerId, pc]) => {
+          const senders = pc.getSenders();
+          const screenAudioTrack = screenStream ? screenStream.getAudioTracks()[0] : null;
+          const existingSender = senders.find(s => s.track && s.track.kind === 'audio' && s.track !== screenAudioTrack);
+
+          if (existingSender) {
+            existingSender.replaceTrack(audioTrack).catch(err => console.error('replaceTrack error:', err));
+          } else {
+            pc.addTrack(audioTrack, localStream);
+            createAndSendOffer(peerId, pc);
+          }
+        });
+      } else {
+        localStream.getAudioTracks().forEach(t => {
+          t.enabled = true;
+        });
+      }
+
+      isMicOn = true;
+      updateMicUI();
+      renderParticipants();
+      socket.emit('user-mic-toggle', { isMicOn: true });
+      showToast('Microphone on 🎤');
+    } catch (err) {
+      console.error('Mic access error:', err);
+      showToast('Microphone access denied');
+    }
+  }
+}
+
+function updateMicUI() {
+  if (!btnMic) return;
+  const label = btnMic.querySelector('.pill-label');
+  const iconOn = document.getElementById('iconMicOn');
+  const iconOff = document.getElementById('iconMicOff');
+
+  if (isMicOn) {
+    btnMic.classList.remove('muted');
+    if (label) label.textContent = 'Mic On';
+    if (iconOn) iconOn.style.display = 'block';
+    if (iconOff) iconOff.style.display = 'none';
+  } else {
+    btnMic.classList.add('muted');
+    if (label) label.textContent = 'Mic Off';
+    if (iconOn) iconOn.style.display = 'none';
+    if (iconOff) iconOff.style.display = 'block';
   }
 }
 
@@ -345,10 +517,13 @@ async function startScreenShare() {
 
     // Show local preview
     videoEl.srcObject = screenStream;
+    videoEl.muted = true; // Local preview must be muted to avoid audio feedback
     videoEl.style.display = 'block';
     videoPlaceholder.style.display = 'none';
     screenShareLabel.classList.add('show');
     sharerName.textContent = 'You are';
+    videoEl.play().catch(e => console.warn('Local play warning:', e));
+    updateStreamAudioUI();
 
     // Handle stream ending (user clicks "Stop sharing" in browser)
     screenStream.getVideoTracks()[0].addEventListener('ended', () => {
@@ -386,6 +561,8 @@ function stopScreenShare() {
   videoEl.style.display = 'none';
   videoPlaceholder.style.display = '';
   screenShareLabel.classList.remove('show');
+  if (videoAudioBadge) videoAudioBadge.style.display = 'none';
+  if (btnStreamAudio) btnStreamAudio.style.display = 'none';
 
   // Remove screen tracks from peers
   Object.entries(peers).forEach(([peerId, pc]) => {
@@ -418,8 +595,11 @@ function createPeerConnection(peerId) {
 
   // Handle incoming tracks (screen share or audio from remote)
   pc.ontrack = (event) => {
-    const stream = event.streams[0];
-    if (!stream) return;
+    console.log(`[WebRTC ${peerId}] Track received:`, event.track.kind);
+    let stream = event.streams && event.streams[0];
+    if (!stream) {
+      stream = new MediaStream([event.track]);
+    }
 
     // Check if it has video → screen share
     if (event.track.kind === 'video') {
@@ -428,9 +608,22 @@ function createPeerConnection(peerId) {
       videoPlaceholder.style.display = 'none';
       screenShareLabel.classList.add('show');
 
-      // Find who is sharing
       const sharer = participants.find(p => p.id === peerId);
       sharerName.textContent = sharer ? sharer.username : 'Someone';
+
+      // Apply viewer's local mute preference to stream audio
+      videoEl.muted = isStreamMutedOnMySide;
+      updateStreamAudioUI();
+
+      // Start playing and handle browser autoplay restrictions gracefully
+      const playPromise = videoEl.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(err => {
+          console.warn('Autoplay prevented, muting video to play:', err);
+          videoEl.muted = true;
+          videoEl.play().catch(e => console.error('Play error after muting:', e));
+        });
+      }
 
       // Handle remote screen share ending
       event.track.addEventListener('ended', () => {
@@ -438,11 +631,26 @@ function createPeerConnection(peerId) {
         videoEl.style.display = 'none';
         videoPlaceholder.style.display = '';
         screenShareLabel.classList.remove('show');
+        if (videoAudioBadge) videoAudioBadge.style.display = 'none';
+        if (btnStreamAudio) btnStreamAudio.style.display = 'none';
       });
     }
 
     if (event.track.kind === 'audio') {
-      // Play remote audio
+      // PREVENT DOUBLE AUDIO:
+      // If this audio track is already part of the screen share stream,
+      // videoEl is already playing it. Do NOT route it to audioEl.
+      const isScreenAudio = (videoEl.srcObject && (
+        videoEl.srcObject.id === stream.id || 
+        videoEl.srcObject.getAudioTracks().some(t => t.id === event.track.id)
+      ));
+
+      if (isScreenAudio) {
+        console.log(`[WebRTC ${peerId}] Screen audio track handled by video player (no double audio).`);
+        return;
+      }
+
+      // Play remote voice chat audio (mic)
       let audioEl = document.getElementById('audio-' + peerId);
       if (!audioEl) {
         audioEl = document.createElement('audio');
@@ -451,16 +659,29 @@ function createPeerConnection(peerId) {
         document.body.appendChild(audioEl);
       }
       audioEl.srcObject = stream;
+      audioEl.play().catch(e => console.warn('Remote audio autoplay error:', e));
     }
   };
 
   pc.onconnectionstatechange = () => {
+    console.log(`[WebRTC ${peerId}] Connection State:`, pc.connectionState);
     if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
       pc.close();
       delete peers[peerId];
+      delete iceCandidateQueues[peerId];
       // Clean up remote audio
       const audioEl = document.getElementById('audio-' + peerId);
       if (audioEl) audioEl.remove();
+    }
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    console.log(`[WebRTC ${peerId}] ICE State:`, pc.iceConnectionState);
+    if (pc.iceConnectionState === 'failed') {
+      if (pc.restartIce) {
+        console.warn(`[WebRTC ${peerId}] Restarting ICE...`);
+        pc.restartIce();
+      }
     }
   };
 
@@ -481,6 +702,10 @@ function createPeerConnection(peerId) {
 
 async function createAndSendOffer(peerId, pc) {
   try {
+    if (pc.signalingState !== 'stable') {
+      console.warn(`[WebRTC ${peerId}] Skipping offer, signalingState is ${pc.signalingState}`);
+      return;
+    }
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     socket.emit('offer', { to: peerId, offer });
@@ -505,7 +730,14 @@ socket.on('offer', async ({ from, offer }) => {
   }
 
   try {
+    if (pc.signalingState !== 'stable') {
+      await Promise.all([
+        pc.setLocalDescription({ type: 'rollback' }).catch(() => {})
+      ]);
+    }
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    await drainIceCandidateQueue(from, pc);
+
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     socket.emit('answer', { to: from, answer });
@@ -519,7 +751,10 @@ socket.on('answer', async ({ from, answer }) => {
   const pc = peers[from];
   if (pc) {
     try {
-      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      if (pc.signalingState === 'have-local-offer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        await drainIceCandidateQueue(from, pc);
+      }
     } catch (err) {
       console.error('Set answer error:', err);
     }
@@ -529,12 +764,15 @@ socket.on('answer', async ({ from, answer }) => {
 // When receiving an ICE candidate
 socket.on('ice-candidate', async ({ from, candidate }) => {
   const pc = peers[from];
-  if (pc) {
-    try {
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (err) {
-      console.error('ICE error:', err);
-    }
+  if (!pc || !pc.remoteDescription || !pc.remoteDescription.type) {
+    if (!iceCandidateQueues[from]) iceCandidateQueues[from] = [];
+    iceCandidateQueues[from].push(new RTCIceCandidate(candidate));
+    return;
+  }
+  try {
+    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+  } catch (err) {
+    console.error('ICE error:', err);
   }
 });
 
@@ -557,6 +795,8 @@ socket.on('user-left', ({ id: peerId }) => {
       videoEl.style.display = 'none';
       videoPlaceholder.style.display = '';
       screenShareLabel.classList.remove('show');
+      if (videoAudioBadge) videoAudioBadge.style.display = 'none';
+      if (btnStreamAudio) btnStreamAudio.style.display = 'none';
     }
   }
 });

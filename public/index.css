@@ -770,6 +770,39 @@ html, body {
   animation: pulseDot 2s infinite;
 }
 
+.video-audio-badge {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  display: none;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  z-index: 10;
+  transition: var(--transition);
+  user-select: none;
+}
+
+.video-audio-badge:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+  transform: translateY(-1px);
+}
+
+.video-audio-badge.muted {
+  color: var(--red);
+  border-color: rgba(240, 78, 106, 0.4);
+  background: var(--red-bg);
+}
+
 /* ─── Bottom Toolbar ─── */
 .toolbar {
   display: flex;

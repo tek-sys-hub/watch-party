@@ -73,6 +73,12 @@ io.on('connection', (socket) => {
     io.to(to).emit('ice-candidate', { from: socket.id, candidate });
   });
 
+  socket.on('user-mic-toggle', ({ isMicOn }) => {
+    const { roomCode } = socket.data || {};
+    if (!roomCode) return;
+    socket.to(roomCode).emit('user-mic-changed', { id: socket.id, isMicOn });
+  });
+
   // ── Chat ──
   socket.on('chat-message', (msg) => {
     const { roomCode, username } = socket.data || {};
