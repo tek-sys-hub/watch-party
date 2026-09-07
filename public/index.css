@@ -1027,6 +1027,34 @@ html, body {
   font-size: 12px;
 }
 
+.conn-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.conn-ok {
+  background: rgba(61, 214, 140, 0.15);
+  color: var(--green);
+  border: 1px solid rgba(61, 214, 140, 0.25);
+}
+
+.conn-warn {
+  background: rgba(245, 197, 66, 0.15);
+  color: var(--yellow);
+  border: 1px solid rgba(245, 197, 66, 0.25);
+}
+
+.conn-err {
+  background: rgba(240, 78, 106, 0.15);
+  color: var(--red);
+  border: 1px solid rgba(240, 78, 106, 0.25);
+}
+
 .participant-status {
   display: flex;
   align-items: center;

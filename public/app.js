@@ -19,31 +19,28 @@ let participants = [];
 let peerMicStates = {};        // { socketId: boolean }
 let hostId = null;
 
-const ICE_SERVERS = {
+let ICE_SERVERS = {
   iceServers: [
-    { urls: 'stun:stun.relay.metered.ca:80' },
-    {
-      urls: 'turn:global.relay.metered.ca:80',
-      username: '719bcdb45e5a7fd9814798f4',
-      credential: 'lAOa/TEg/Q7TcTBK',
-    },
-    {
-      urls: 'turn:global.relay.metered.ca:80?transport=tcp',
-      username: '719bcdb45e5a7fd9814798f4',
-      credential: 'lAOa/TEg/Q7TcTBK',
-    },
-    {
-      urls: 'turn:global.relay.metered.ca:443',
-      username: '719bcdb45e5a7fd9814798f4',
-      credential: 'lAOa/TEg/Q7TcTBK',
-    },
-    {
-      urls: 'turns:global.relay.metered.ca:443?transport=tcp',
-      username: '719bcdb45e5a7fd9814798f4',
-      credential: 'lAOa/TEg/Q7TcTBK',
-    },
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
   ]
 };
+
+// Fetch dynamic ICE configuration from backend (includes TURN if configured)
+fetch('/api/ice-servers')
+  .then(res => res.json())
+  .then(data => {
+    if (data && Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+      ICE_SERVERS = { iceServers: data.iceServers };
+      console.log('[WebRTC] Active ICE servers:', ICE_SERVERS.iceServers.map(s => s.urls));
+    }
+  })
+  .catch(err => {
+    console.warn('[WebRTC] Could not load /api/ice-servers, using Google STUN fallback:', err);
+  });
 
 // Queue ICE candidates arriving before remote description is set
 const iceCandidateQueues = {};
@@ -51,6 +48,7 @@ const iceCandidateQueues = {};
 async function drainIceCandidateQueue(peerId, pc) {
   const queue = iceCandidateQueues[peerId];
   if (!queue || queue.length === 0) return;
+  console.log(`[WebRTC ${peerId}] Draining ${queue.length} queued ICE candidate(s)...`);
   while (queue.length > 0) {
     const candidate = queue.shift();
     try {
@@ -168,6 +166,16 @@ function joinRoom() {
   socket.emit('join-room', { roomCode: myRoomCode, username: myUsername }, (res) => {
     if (res.success) {
       enterRoom();
+      // Connect to existing participants in the room
+      if (Array.isArray(res.existingParticipants) && res.existingParticipants.length > 0) {
+        res.existingParticipants.forEach((p) => {
+          if (p.id !== socket.id) {
+            console.log(`[WebRTC] Connecting to existing participant ${p.username} (${p.id})`);
+            const pc = createPeerConnection(p.id);
+            createAndSendOffer(p.id, pc);
+          }
+        });
+      }
     } else {
       showError('errorJoin', res.error || 'Could not join room.');
     }
@@ -327,6 +335,18 @@ socket.on('user-mic-changed', ({ id, isMicOn: status }) => {
   renderParticipants();
 });
 
+let peerConnectionStates = {};
+
+function updatePeerConnectionBadge(peerId, state) {
+  peerConnectionStates[peerId] = state;
+  const badge = document.getElementById(`conn-badge-${peerId}`);
+  if (badge) {
+    badge.className = `conn-badge conn-${state === 'connected' ? 'ok' : (state === 'failed' ? 'err' : 'warn')}`;
+    badge.textContent = state === 'connected' ? 'Live' : (state === 'failed' ? 'Failed' : 'Connecting');
+    badge.title = `WebRTC: ${state}`;
+  }
+}
+
 function renderParticipants() {
   participantsList.innerHTML = '';
   participantCount.textContent = participants.length;
@@ -339,12 +359,20 @@ function renderParticipants() {
     const isMe = p.id === socket.id;
     const isHost = p.id === hostId;
     const peerMicOn = isMe ? isMicOn : !!peerMicStates[p.id];
+    const pc = peers[p.id];
+    const connState = peerConnectionStates[p.id] || (pc ? pc.connectionState : 'connecting');
+    const badgeHtml = isMe ? '' : `
+      <span class="conn-badge conn-${connState === 'connected' ? 'ok' : (connState === 'failed' ? 'err' : 'warn')}" id="conn-badge-${p.id}" title="WebRTC: ${connState}">
+        ${connState === 'connected' ? 'Live' : (connState === 'failed' ? 'Failed' : 'Connecting')}
+      </span>
+    `;
 
     row.innerHTML = `
       <div class="participant-avatar ${AVATAR_COLORS[i % AVATAR_COLORS.length]}">${escapeHtml(p.username.charAt(0))}</div>
       <div class="participant-name">
         ${escapeHtml(p.username)}${isHost ? ' <span class="host-badge">👑</span>' : ''}${isMe ? ' <span class="you-tag">(You)</span>' : ''}
       </div>
+      ${badgeHtml}
       <div class="participant-status">
         <span class="status-dot" style="${peerMicOn ? '' : 'background: var(--text-muted); opacity: 0.4;'}"></span>
         <svg class="participant-mic-icon" style="${peerMicOn ? 'color: var(--green);' : 'color: var(--text-muted); opacity: 0.4;'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -589,10 +617,22 @@ function createPeerConnection(peerId) {
   const pc = new RTCPeerConnection(ICE_SERVERS);
   peers[peerId] = pc;
 
+  // Keep connection open with a lightweight data channel (prevents empty SDP and keeps NAT open)
+  try {
+    const dc = pc.createDataChannel('keepalive', { negotiated: true, id: 0 });
+    dc.onopen = () => console.log(`[WebRTC ${peerId}] DataChannel connected (P2P alive)`);
+  } catch (e) {
+    console.warn(`[WebRTC ${peerId}] DataChannel note:`, e);
+  }
+
   // Send ICE candidates to the remote peer
   pc.onicecandidate = (event) => {
     if (event.candidate) {
+      const candType = event.candidate.type || 'candidate';
+      console.log(`[ICE ${peerId}] Candidate (${candType}):`, event.candidate.candidate);
       socket.emit('ice-candidate', { to: peerId, candidate: event.candidate });
+    } else {
+      console.log(`[ICE ${peerId}] All local ICE candidates gathered.`);
     }
   };
 
@@ -662,17 +702,38 @@ function createPeerConnection(peerId) {
         document.body.appendChild(audioEl);
       }
       audioEl.srcObject = stream;
-      audioEl.play().catch(e => console.warn('Remote audio autoplay error:', e));
+      const playPromise = audioEl.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(e => {
+          console.warn('Remote audio autoplay blocked by browser policy:', e);
+          const unlockAudio = () => {
+            audioEl.play().catch(() => {});
+            document.removeEventListener('click', unlockAudio);
+          };
+          document.addEventListener('click', unlockAudio, { once: true });
+        });
+      }
     }
   };
 
   pc.onconnectionstatechange = () => {
     console.log(`[WebRTC ${peerId}] Connection State:`, pc.connectionState);
-    if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-      pc.close();
+    updatePeerConnectionBadge(peerId, pc.connectionState);
+
+    if (pc.connectionState === 'failed') {
+      console.warn(`[WebRTC ${peerId}] WebRTC connection failed. Attempting ICE restart...`);
+      try {
+        if (typeof pc.restartIce === 'function') {
+          pc.restartIce();
+          createAndSendOffer(peerId, pc);
+        }
+      } catch (e) {
+        console.error('ICE restart error:', e);
+      }
+    } else if (pc.connectionState === 'closed') {
       delete peers[peerId];
       delete iceCandidateQueues[peerId];
-      // Clean up remote audio
+      delete peerConnectionStates[peerId];
       const audioEl = document.getElementById('audio-' + peerId);
       if (audioEl) audioEl.remove();
     }
@@ -680,10 +741,13 @@ function createPeerConnection(peerId) {
 
   pc.oniceconnectionstatechange = () => {
     console.log(`[WebRTC ${peerId}] ICE State:`, pc.iceConnectionState);
-    if (pc.iceConnectionState === 'failed') {
-      if (pc.restartIce) {
-        console.warn(`[WebRTC ${peerId}] Restarting ICE...`);
+    if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+      updatePeerConnectionBadge(peerId, 'connected');
+    } else if (pc.iceConnectionState === 'failed') {
+      updatePeerConnectionBadge(peerId, 'failed');
+      if (typeof pc.restartIce === 'function') {
         pc.restartIce();
+        createAndSendOffer(peerId, pc);
       }
     }
   };
@@ -705,6 +769,7 @@ function createPeerConnection(peerId) {
 
 async function createAndSendOffer(peerId, pc) {
   try {
+    if (!pc) return;
     if (pc.signalingState !== 'stable') {
       console.warn(`[WebRTC ${peerId}] signalingState is ${pc.signalingState}, waiting for stable...`);
       await new Promise(resolve => {
@@ -718,7 +783,7 @@ async function createAndSendOffer(peerId, pc) {
         setTimeout(() => {
           pc.removeEventListener('signalingstatechange', handler);
           resolve();
-        }, 1500);
+        }, 2000);
       });
       if (pc.signalingState !== 'stable') {
         console.warn(`[WebRTC ${peerId}] Rolling back from ${pc.signalingState} to create fresh offer`);
@@ -737,10 +802,10 @@ async function createAndSendOffer(peerId, pc) {
 // ── Signaling handlers ──
 
 // When a new user joins, existing users prepare the connection
-socket.on('user-joined', async ({ id: peerId }) => {
-  console.log(`[WebRTC] Peer ${peerId} joined room.`);
-  const pc = createPeerConnection(peerId);
-  // Only initiate an offer if we have media (screen or mic) to send
+socket.on('user-joined', async ({ id: peerId, username }) => {
+  console.log(`[WebRTC] Peer ${username || peerId} joined room.`);
+  const pc = peers[peerId] || createPeerConnection(peerId);
+  // If we already have media active (screen or mic), send offer to newcomer immediately
   if (localStream || screenStream) {
     await createAndSendOffer(peerId, pc);
   }
@@ -790,16 +855,17 @@ socket.on('answer', async ({ from, answer }) => {
 
 // When receiving an ICE candidate
 socket.on('ice-candidate', async ({ from, candidate }) => {
+  if (!candidate) return;
   const pc = peers[from];
   if (!pc || !pc.remoteDescription || !pc.remoteDescription.type) {
     if (!iceCandidateQueues[from]) iceCandidateQueues[from] = [];
-    iceCandidateQueues[from].push(new RTCIceCandidate(candidate));
+    iceCandidateQueues[from].push(candidate);
     return;
   }
   try {
-    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    await pc.addIceCandidate(candidate);
   } catch (err) {
-    console.error('ICE error:', err);
+    console.error(`[WebRTC ${from}] Error adding ICE candidate:`, err);
   }
 });
 
@@ -809,6 +875,8 @@ socket.on('user-left', ({ id: peerId }) => {
   if (pc) {
     pc.close();
     delete peers[peerId];
+    delete iceCandidateQueues[peerId];
+    delete peerConnectionStates[peerId];
   }
   const audioEl = document.getElementById('audio-' + peerId);
   if (audioEl) audioEl.remove();

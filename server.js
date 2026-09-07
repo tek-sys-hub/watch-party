@@ -11,6 +11,37 @@ const io = new Server(server, {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Health check for cloud hosts
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
+});
+
+// Dynamic ICE servers endpoint
+function getIceServers() {
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+  ];
+
+  // If user configures custom TURN servers via environment variables
+  if (process.env.TURN_URLS) {
+    const urls = process.env.TURN_URLS.split(',').map(u => u.trim());
+    const turnConfig = { urls };
+    if (process.env.TURN_USERNAME) turnConfig.username = process.env.TURN_USERNAME;
+    if (process.env.TURN_CREDENTIAL) turnConfig.credential = process.env.TURN_CREDENTIAL;
+    iceServers.push(turnConfig);
+  }
+
+  return iceServers;
+}
+
+app.get('/api/ice-servers', (req, res) => {
+  res.json({ iceServers: getIceServers() });
+});
+
 // In-memory room store
 const rooms = new Map();
 
@@ -25,6 +56,10 @@ function generateRoomCode() {
 
 io.on('connection', (socket) => {
   console.log(`[connect] ${socket.id}`);
+
+  socket.on('get-ice-servers', (cb) => {
+    if (typeof cb === 'function') cb({ iceServers: getIceServers() });
+  });
 
   // ── Create Room ──
   socket.on('create-room', ({ username }, cb) => {
@@ -49,10 +84,11 @@ io.on('connection', (socket) => {
     if (room.participants.length >= 6) {
       return cb({ success: false, error: 'Room is full (max 6 participants).' });
     }
+    const existingParticipants = room.participants.map(p => ({ id: p.id, username: p.username }));
     room.participants.push({ id: socket.id, username });
     socket.join(roomCode);
     socket.data = { roomCode, username };
-    cb({ success: true, roomCode });
+    cb({ success: true, roomCode, existingParticipants });
 
     // Notify existing participants about the new joiner
     socket.to(roomCode).emit('user-joined', { id: socket.id, username });
@@ -112,6 +148,6 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`🎬 WatchParty running on http://localhost:${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🎬 WatchParty running on http://0.0.0.0:${PORT}`);
 });
