@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WatchParty – Watch Movies with Friends</title>
+  <meta name="description" content="Watch movies together with friends in real-time. Screen share, voice chat, and text chat all in one place." />
+  <link rel="stylesheet" href="index.css" />
+</head>
+<body>
+
+  <!-- ═══════ MODAL ═══════ -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+
+      <!-- Step 1: Choose action -->
+      <div class="modal-step active" id="stepChoose">
+        <div class="modal-logo">
+          <div class="logo-icon">🎬</div>
+          <h1>WatchParty</h1>
+        </div>
+        <p class="modal-subtitle">Watch movies together with friends in real-time</p>
+
+        <div class="input-group">
+          <label for="inputUsername">Your Name</label>
+          <input type="text" id="inputUsername" placeholder="Enter your display name" maxlength="20" autocomplete="off" />
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn btn-secondary" id="btnJoinTab" onclick="showJoinStep()">
+            🚪 Join Room
+          </button>
+          <button class="btn btn-primary" id="btnCreateRoom" onclick="createRoom()">
+            ✨ Create Room
+          </button>
+        </div>
+
+        <div class="modal-error" id="errorChoose"></div>
+      </div>
+
+      <!-- Step 2: Join with code -->
+      <div class="modal-step" id="stepJoin">
+        <div class="modal-logo">
+          <div class="logo-icon">🚪</div>
+          <h1>Join Room</h1>
+        </div>
+        <p class="modal-subtitle">Enter the room code shared by your friend</p>
+
+        <div class="input-group">
+          <label for="inputRoomCode">Room Code</label>
+          <input type="text" id="inputRoomCode" placeholder="e.g. ABC123" maxlength="6" autocomplete="off" style="text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600;" />
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="showChooseStep()">
+            ← Back
+          </button>
+          <button class="btn btn-primary" id="btnJoinRoom" onclick="joinRoom()">
+            🚀 Join
+          </button>
+        </div>
+
+        <div class="modal-error" id="errorJoin"></div>
+      </div>
+
+      <!-- Step 3: Room created (show code) -->
+      <div class="modal-step" id="stepCreated">
+        <div class="modal-logo">
+          <div class="logo-icon">🎉</div>
+          <h1>Room Ready!</h1>
+        </div>
+        <p class="modal-subtitle">Share this code with your friends to join</p>
+
+        <div class="room-code-display">
+          <div class="code" id="createdRoomCode">------</div>
+          <div class="code-hint">Share this code with friends</div>
+          <button class="copy-btn" onclick="copyRoomCode()">📋 Copy Code</button>
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn btn-primary" onclick="enterRoom()" style="flex:1">
+            🎬 Enter Room
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ═══════ MAIN APP ═══════ -->
+  <div class="app" id="app">
+
+    <!-- Top Bar -->
+    <div class="topbar">
+      <div class="topbar-left">
+        <div class="topbar-logo">
+          <span>🎬</span> WatchParty
+        </div>
+        <div class="room-badge">
+          Room:<strong id="displayRoomCode">---</strong>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <div class="room-badge" id="displayUsername" style="border-color: var(--border-active);">
+          👤 ---
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+
+      <!-- Video Area -->
+      <div class="video-area">
+        <div class="video-container" id="videoContainer">
+          <video id="sharedVideo" autoplay playsinline style="display:none;"></video>
+          <div class="video-placeholder" id="videoPlaceholder">
+            <div class="placeholder-icon">🖥️</div>
+            <p>No one is sharing their screen</p>
+            <p class="hint">Click the screen share button below to start</p>
+          </div>
+          <div class="screen-share-label" id="screenShareLabel">
+            <span class="dot"></span>
+            <span id="sharerName">Someone</span> is sharing
+          </div>
+        </div>
+      </div>
+
+      <!-- Chat Sidebar -->
+      <div class="chat-sidebar">
+        <div class="chat-header">
+          <h3>💬 Chat</h3>
+          <div class="participant-count" id="participantCount">0 online</div>
+        </div>
+
+        <div class="participants-strip" id="participantsStrip">
+          <!-- Participant chips injected here -->
+        </div>
+
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-msg-system">Welcome to WatchParty! 🎬</div>
+        </div>
+
+        <div class="chat-input-area">
+          <div class="chat-input-wrapper">
+            <input type="text" id="chatInput" placeholder="Type a message…" autocomplete="off" />
+            <button class="chat-send-btn" id="chatSendBtn" onclick="sendChat()">➤</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Toolbar -->
+    <div class="toolbar">
+      <button class="toolbar-btn" id="btnMic" onclick="toggleMic()">
+        🎤
+        <span class="tooltip">Toggle Mic</span>
+      </button>
+      <button class="toolbar-btn" id="btnScreen" onclick="toggleScreenShare()">
+        🖥️
+        <span class="tooltip">Share Screen</span>
+      </button>
+      <div class="toolbar-divider"></div>
+      <button class="toolbar-btn danger" id="btnLeave" onclick="leaveRoom()">
+        🚪
+        <span class="tooltip">Leave Room</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
