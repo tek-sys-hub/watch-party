@@ -62,10 +62,12 @@ io.on('connection', (socket) => {
 
   // ── WebRTC Signaling ──
   socket.on('offer', ({ to, offer }) => {
+    console.log(`[signal] offer: ${socket.id} -> ${to}`);
     io.to(to).emit('offer', { from: socket.id, offer });
   });
 
   socket.on('answer', ({ to, answer }) => {
+    console.log(`[signal] answer: ${socket.id} -> ${to}`);
     io.to(to).emit('answer', { from: socket.id, answer });
   });
 

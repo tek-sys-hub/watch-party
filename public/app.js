@@ -23,22 +23,11 @@ const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:openrelay.metered.ca:80' },
-    {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    }
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:global.stun.twilio.com:3478' }
   ]
 };
 
@@ -703,27 +692,49 @@ function createPeerConnection(peerId) {
 async function createAndSendOffer(peerId, pc) {
   try {
     if (pc.signalingState !== 'stable') {
-      console.warn(`[WebRTC ${peerId}] Skipping offer, signalingState is ${pc.signalingState}`);
-      return;
+      console.warn(`[WebRTC ${peerId}] signalingState is ${pc.signalingState}, waiting for stable...`);
+      await new Promise(resolve => {
+        const handler = () => {
+          if (pc.signalingState === 'stable' || !peers[peerId]) {
+            pc.removeEventListener('signalingstatechange', handler);
+            resolve();
+          }
+        };
+        pc.addEventListener('signalingstatechange', handler);
+        setTimeout(() => {
+          pc.removeEventListener('signalingstatechange', handler);
+          resolve();
+        }, 1500);
+      });
+      if (pc.signalingState !== 'stable') {
+        console.warn(`[WebRTC ${peerId}] Rolling back from ${pc.signalingState} to create fresh offer`);
+        await pc.setLocalDescription({ type: 'rollback' }).catch(() => {});
+      }
     }
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    console.log(`[WebRTC ${peerId}] Sending offer to peer.`);
     socket.emit('offer', { to: peerId, offer });
   } catch (err) {
-    console.error('Offer error:', err);
+    console.error(`[WebRTC ${peerId}] Offer error:`, err);
   }
 }
 
 // ── Signaling handlers ──
 
-// When a new user joins, existing users initiate the connection
+// When a new user joins, existing users prepare the connection
 socket.on('user-joined', async ({ id: peerId }) => {
+  console.log(`[WebRTC] Peer ${peerId} joined room.`);
   const pc = createPeerConnection(peerId);
-  await createAndSendOffer(peerId, pc);
+  // Only initiate an offer if we have media (screen or mic) to send
+  if (localStream || screenStream) {
+    await createAndSendOffer(peerId, pc);
+  }
 });
 
 // When receiving an offer from a peer
 socket.on('offer', async ({ from, offer }) => {
+  console.log(`[WebRTC ${from}] Received offer from peer.`);
   let pc = peers[from];
   if (!pc) {
     pc = createPeerConnection(from);
@@ -731,32 +742,34 @@ socket.on('offer', async ({ from, offer }) => {
 
   try {
     if (pc.signalingState !== 'stable') {
-      await Promise.all([
-        pc.setLocalDescription({ type: 'rollback' }).catch(() => {})
-      ]);
+      console.warn(`[WebRTC ${from}] Rolling back from ${pc.signalingState} to accept incoming offer`);
+      await pc.setLocalDescription({ type: 'rollback' }).catch(() => {});
     }
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
     await drainIceCandidateQueue(from, pc);
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    console.log(`[WebRTC ${from}] Sending answer to peer.`);
     socket.emit('answer', { to: from, answer });
   } catch (err) {
-    console.error('Answer error:', err);
+    console.error(`[WebRTC ${from}] Answer error:`, err);
   }
 });
 
 // When receiving an answer
 socket.on('answer', async ({ from, answer }) => {
+  console.log(`[WebRTC ${from}] Received answer from peer.`);
   const pc = peers[from];
   if (pc) {
     try {
       if (pc.signalingState === 'have-local-offer') {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
         await drainIceCandidateQueue(from, pc);
+        console.log(`[WebRTC ${from}] Remote description set, connection negotiated.`);
       }
     } catch (err) {
-      console.error('Set answer error:', err);
+      console.error(`[WebRTC ${from}] Set answer error:`, err);
     }
   }
 });
