@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────
-   WatchParty – Client App
+   WatchParty – Client App (Redesigned)
    WebRTC Screen Share + Mic + Socket.IO Chat
    ───────────────────────────────────────────── */
 
@@ -12,8 +12,10 @@ let localStream = null;        // mic stream
 let screenStream = null;       // screen share stream
 let isMicOn = false;
 let isScreenSharing = false;
+let isChatVisible = true;
 let peers = {};                // { peerId: RTCPeerConnection }
 let participants = [];
+let hostId = null;
 
 const ICE_SERVERS = {
   iceServers: [
@@ -23,6 +25,7 @@ const ICE_SERVERS = {
 };
 
 // ── DOM Elements ──
+const landing = document.getElementById('landing');
 const modalOverlay = document.getElementById('modalOverlay');
 const appEl = document.getElementById('app');
 const inputUsername = document.getElementById('inputUsername');
@@ -30,18 +33,23 @@ const inputRoomCode = document.getElementById('inputRoomCode');
 const errorChoose = document.getElementById('errorChoose');
 const errorJoin = document.getElementById('errorJoin');
 const createdRoomCodeEl = document.getElementById('createdRoomCode');
+const createdUsernameEl = document.getElementById('createdUsername');
+const joinUsernameEl = document.getElementById('joinUsername');
 const displayRoomCode = document.getElementById('displayRoomCode');
-const displayUsername = document.getElementById('displayUsername');
 const videoEl = document.getElementById('sharedVideo');
 const videoPlaceholder = document.getElementById('videoPlaceholder');
 const screenShareLabel = document.getElementById('screenShareLabel');
 const sharerName = document.getElementById('sharerName');
-const participantsStrip = document.getElementById('participantsStrip');
+const participantsList = document.getElementById('participantsList');
 const participantCount = document.getElementById('participantCount');
+const participantCountTop = document.getElementById('participantCountTop');
 const chatMessages = document.getElementById('chatMessages');
 const chatInput = document.getElementById('chatInput');
+const chatPanel = document.getElementById('chatPanel');
+const sidebar = document.getElementById('sidebar');
 const btnMic = document.getElementById('btnMic');
 const btnScreen = document.getElementById('btnScreen');
+const btnChatToggle = document.getElementById('btnChatToggle');
 
 // ══════════════════════════════════
 // MODAL NAVIGATION
@@ -52,7 +60,9 @@ function showStep(stepId) {
   document.getElementById(stepId).classList.add('active');
 }
 
-function showChooseStep() { showStep('stepChoose'); }
+function showChooseStep() {
+  showStep('stepChoose');
+}
 
 function showJoinStep() {
   const name = inputUsername.value.trim();
@@ -61,8 +71,17 @@ function showJoinStep() {
     inputUsername.focus();
     return;
   }
+  // Sync username to join modal
+  joinUsernameEl.value = name;
   showStep('stepJoin');
   setTimeout(() => inputRoomCode.focus(), 100);
+}
+
+function closeModal() {
+  // Only close if we're in the room
+  if (myRoomCode && appEl.classList.contains('active')) {
+    modalOverlay.classList.add('hidden');
+  }
 }
 
 function showError(id, msg) {
@@ -88,7 +107,9 @@ function createRoom() {
   socket.emit('create-room', { username: myUsername }, (res) => {
     if (res.success) {
       myRoomCode = res.roomCode;
+      hostId = socket.id;
       createdRoomCodeEl.textContent = myRoomCode;
+      createdUsernameEl.value = myUsername;
       showStep('stepCreated');
     } else {
       showError('errorChoose', res.error || 'Failed to create room.');
@@ -115,10 +136,10 @@ function joinRoom() {
 }
 
 function enterRoom() {
+  landing.style.display = 'none';
   modalOverlay.classList.add('hidden');
   appEl.classList.add('active');
   displayRoomCode.textContent = myRoomCode;
-  displayUsername.textContent = '👤 ' + myUsername;
   showToast(`Joined room ${myRoomCode}`);
 }
 
@@ -147,6 +168,21 @@ function leaveRoom() {
 }
 
 // ══════════════════════════════════
+// CHAT TOGGLE
+// ══════════════════════════════════
+
+function toggleChat() {
+  isChatVisible = !isChatVisible;
+  if (isChatVisible) {
+    chatPanel.style.display = 'flex';
+    btnChatToggle.classList.add('active');
+  } else {
+    chatPanel.style.display = 'none';
+    btnChatToggle.classList.remove('active');
+  }
+}
+
+// ══════════════════════════════════
 // PARTICIPANTS
 // ══════════════════════════════════
 
@@ -154,28 +190,37 @@ const AVATAR_COLORS = ['avatar-0','avatar-1','avatar-2','avatar-3','avatar-4','a
 
 socket.on('participants-updated', (list) => {
   participants = list;
+  // First participant is always the host
+  if (list.length > 0 && !hostId) {
+    hostId = list[0].id;
+  }
   renderParticipants();
 });
 
 function renderParticipants() {
-  participantsStrip.innerHTML = '';
-  participantCount.textContent = `${participants.length} online`;
+  participantsList.innerHTML = '';
+  participantCount.textContent = participants.length;
+  participantCountTop.textContent = `${participants.length} people`;
 
   participants.forEach((p, i) => {
-    const chip = document.createElement('div');
-    chip.className = 'participant-chip' + (p.id === socket.id ? ' is-you' : '');
+    const row = document.createElement('div');
+    row.className = 'participant-row';
 
-    const avatar = document.createElement('div');
-    avatar.className = `participant-avatar ${AVATAR_COLORS[i % AVATAR_COLORS.length]}`;
-    avatar.textContent = p.username.charAt(0);
+    const isMe = p.id === socket.id;
+    const isHost = p.id === hostId;
 
-    const name = document.createElement('span');
-    name.className = 'name';
-    name.textContent = p.username;
+    row.innerHTML = `
+      <div class="participant-avatar ${AVATAR_COLORS[i % AVATAR_COLORS.length]}">${escapeHtml(p.username.charAt(0))}</div>
+      <div class="participant-name">
+        ${escapeHtml(p.username)}${isHost ? ' <span class="host-badge">👑</span>' : ''}${isMe ? ' <span class="you-tag">(You)</span>' : ''}
+      </div>
+      <div class="participant-status">
+        <span class="status-dot"></span>
+        <svg class="participant-mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+      </div>
+    `;
 
-    chip.appendChild(avatar);
-    chip.appendChild(name);
-    participantsStrip.appendChild(chip);
+    participantsList.appendChild(row);
   });
 }
 
@@ -197,7 +242,8 @@ chatInput.addEventListener('keydown', (e) => {
 
 socket.on('chat-message', ({ username, text, timestamp }) => {
   const msgDiv = document.createElement('div');
-  msgDiv.className = 'chat-msg';
+  const isOwn = username === myUsername;
+  msgDiv.className = 'chat-msg' + (isOwn ? ' is-own' : '');
 
   const time = new Date(timestamp);
   const timeStr = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -243,9 +289,8 @@ async function toggleMic() {
       localStream = null;
     }
     isMicOn = false;
-    btnMic.classList.remove('active');
     btnMic.classList.add('muted');
-    btnMic.innerHTML = '🔇<span class="tooltip">Unmute Mic</span>';
+    btnMic.querySelector('.pill-label').textContent = 'Mic Off';
 
     // Remove audio track from all peer connections
     Object.values(peers).forEach(pc => {
@@ -260,9 +305,8 @@ async function toggleMic() {
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       isMicOn = true;
-      btnMic.classList.add('active');
       btnMic.classList.remove('muted');
-      btnMic.innerHTML = '🎤<span class="tooltip">Mute Mic</span>';
+      btnMic.querySelector('.pill-label').textContent = 'Mic On';
 
       // Add audio track to all peer connections
       const audioTrack = localStream.getAudioTracks()[0];
@@ -297,6 +341,7 @@ async function startScreenShare() {
 
     isScreenSharing = true;
     btnScreen.classList.add('active');
+    document.getElementById('screenLabel').textContent = 'Stop Sharing';
 
     // Show local preview
     videoEl.srcObject = screenStream;
@@ -335,6 +380,7 @@ function stopScreenShare() {
   }
   isScreenSharing = false;
   btnScreen.classList.remove('active');
+  document.getElementById('screenLabel').textContent = 'Share Screen';
 
   videoEl.srcObject = null;
   videoEl.style.display = 'none';
